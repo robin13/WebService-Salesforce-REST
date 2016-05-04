@@ -6,6 +6,7 @@ use MooseX::WithCache;
 use LWP::UserAgent;
 use HTTP::Request;
 use HTTP::Headers;
+use HTTP::Message;
 use JSON;
 use Class::Date qw/gmdate/;
 use POSIX; #strftime
@@ -365,9 +366,10 @@ sub headers {
             $self->refresh_access_token;
         }
         my $h = HTTP::Headers->new();
-        $h->header( 'Content-Type'  => "application/json" );
-        $h->header( 'Accept'	    => "application/json" );
-        $h->header( 'Authorization' => "Bearer " . $self->access_token );
+        $h->header( 'Content-Type'      => "application/json" );
+        $h->header( 'Accept-Encoding'   => HTTP::Message::decodable );
+        $h->header( 'Accept'	        => "application/json" );
+        $h->header( 'Authorization'     => "Bearer " . $self->access_token );
         $self->_set_headers( $h );
     }
     return $self->_headers;
