@@ -14,7 +14,7 @@ use YAML qw/Dump LoadFile DumpFile/;
 use Encode;
 use URI::Encode qw/uri_encode/;
 
-our $VERSION = 0.001;
+our $VERSION = 0.002;
 
 =head1 NAME
 
@@ -328,11 +328,11 @@ sub refresh_access_token {
     $self->log->debug( "Requesting access_token for: $params{username}" );
     my $h = HTTP::Headers->new();
     $h->header( "Content-Type" => "application/x-www-form-urlencoded" );
+    $h->header( 'Accept-Encoding'   => HTTP::Message::decodable ); # Enable compression
     $h->header( 'Accept'	=> "application/json" );
-    my $data = $self->_request_from_api(
+    my $data = $self->request_from_api(
         headers     => $h,
-        uri         => 'https://' . ( $self->is_sandbox ? 'test' : 'login' ) . '.salesforce.com',
-        path        => '/services/oauth2/token',
+        uri         => 'https://' . ( $self->is_sandbox ? 'test' : 'login' ) . '.salesforce.com/services/oauth2/token',
         body       => sprintf( 'grant_type=password&username=%s&password=%s%s&client_id=%s&client_secret=%s',
                                 uri_encode( $params{username} ),
                                 uri_encode( $params{password} ), uri_encode( $params{security_token} ),
@@ -362,14 +362,17 @@ Returns a HTTP::Headers object with the Authorization header set with a valid ac
 sub headers {
     my $self = shift;
     if( not $self->_headers ){
+        $self->log->debug( "Headers do not exist - creating" );
         if( not $self->access_token ){
+            $self->log->debug( "No access_token found for headers - refreshing access token" );
             $self->refresh_access_token;
         }
         my $h = HTTP::Headers->new();
         $h->header( 'Content-Type'      => "application/json" );
-        $h->header( 'Accept-Encoding'   => HTTP::Message::decodable );
+        $h->header( 'Accept-Encoding'   => HTTP::Message::decodable ); # Enable compression
         $h->header( 'Accept'	        => "application/json" );
         $h->header( 'Authorization'     => "Bearer " . $self->access_token );
+        $self->log->trace( "Headers:\n" . Dump( $h ) ) if $self->log->is_trace;
         $self->_set_headers( $h );
     }
     return $self->_headers;
@@ -384,6 +387,58 @@ This is a module in development - only a subset of all of the API endpoints have
 
 =over 4
 
+=item version
+
+Get versions info
+
+https://developer.salesforce.com/docs/atlas.en-us.api_rest.meta/api_rest/resources_versions.htm
+
+=cut
+
+sub versions {
+    my $self = shift;
+    my %params;
+    $params{path}   = '/';
+    $params{method} = 'GET';
+
+    return $self->request_from_api( %params );
+}
+
+=item sobjects
+
+Lists the available objects and their metadata for your organization’s data.
+
+https://developer.salesforce.com/docs/atlas.en-us.api_rest.meta/api_rest/resources_describeGlobal.htm
+
+=cut
+
+sub sobjects {
+    my $self = shift;
+    my %params;
+    $params{path}   = '/sobjects/';
+    $params{method} = 'GET';
+    return $self->request_from_api( %params );
+}
+
+=item sobject_describe
+
+Completely describes the individual metadata at all levels for the specified object
+
+https://developer.salesforce.com/docs/atlas.en-us.api_rest.meta/api_rest/resources_sobject_describe.htm
+
+=cut
+
+sub sobject_describe {
+    my ( $self, %params ) = validated_hash(
+        \@_,
+        name	    => { isa    => 'Str' },
+	);
+    $params{path}   = '/sobjects/' . $params{name} . '/describe/';
+    $params{method} = 'GET';
+    delete( $params{name} );
+
+    return $self->request_from_api( %params );
+}
 =item query
 
 execute a query
@@ -396,17 +451,15 @@ sub query {
         query	    => { isa    => 'Str', optional => 1 },
         options	    => { isa    => 'Str', optional => 1 },
 	);
-    $params{path}   = '/services/data/' . $self->api_version . '/query/';
+    $params{path}   = '/query/';
     $params{method} = 'GET';
     $params{options} .= ( $params{options} ? '&' : '' ) . 'q=' . uri_encode( $params{query} );
     delete( $params{query} );
 
-    return $self->_request_from_api( %params );
+    return $self->request_from_api( %params );
 }
 
-
-
-sub _request_from_api {
+sub request_from_api {
     my ( $self, %params ) = validated_hash(
         \@_,
         method	=> { isa => 'Str', optional => 1, default => 'POST' },
@@ -416,36 +469,44 @@ sub _request_from_api {
         headers => { isa => 'HTTP::Headers', optional => 1 },
         options => { isa => 'Str', optional => 1 },
     );
-    $params{headers} ||= $self->headers;
 
-    my $url = $params{uri} || $self->instance_url;
-    $url .=  $params{path} if( $params{path} );
+    my $url;
+    if( $params{uri} ){
+        $url = $params{uri};
+    }else{
+        $url = $self->instance_url;
+        $url .= '/services/data/' . $self->api_version;
+        $url .= $params{path} if( $params{path} );
+    }
     $url .= ( $url =~ m/\?/ ? '&' : '?' )  . $params{options} if( $params{options} );
-
-    my $request = HTTP::Request->new(
-        $params{method},
-        $url,
-        $params{headers},
-        );
-    $request->content( $params{body} ) if( $params{body} );
-
-    $self->log->debug( "Requesting: " . $url );
-    $self->log->trace( "Request:\n" . Dump( $request ) ) if $self->log->is_trace;
 
     my $response;
     my $retry = 1;
     my $try_count = 0;
     do{
+        my $headers = $params{headers} || $self->headers;
+        my $request = HTTP::Request->new(
+            $params{method},
+            $url,
+            $headers,
+        );
+        $request->content( $params{body} ) if( $params{body} );
+
+        $self->log->debug( "Requesting: " . $url );
+        $self->log->trace( "Request:\n" . Dump( $request ) ) if $self->log->is_trace;
+
         my $retry_delay = $self->default_backoff;
         $try_count++;
         $response = $self->user_agent->request( $request );
+        $self->log->trace( "Response:\n", Dump( $response ) ) if $self->log->is_trace;
+        $self->log->trace( "Decoded content:\n", $response->decoded_content ) if $self->log->is_trace;
         if( $response->is_success ){
             $retry = 0;
         }else{
             # 401 and "session expired" requires fresh token and login
             if( $response->code == 401 ){
                 my $data = decode_json( encode( 'utf8', $response->decoded_content ) );
-                if( $data->{errorCode} eq 'INVALID_SESSION_ID' ){
+                if( $data->[0]{errorCode} and $data->[0]{errorCode} eq 'INVALID_SESSION_ID' ){
                     $self->refresh_access_token;
                     $retry_delay = 0;
                 }
@@ -484,7 +545,6 @@ sub _request_from_api {
         }
     }while( $retry );
 
-    $self->log->trace( "Last response:\n", Dump( $response ) ) if $self->log->is_trace;
     if( not $response->is_success ){
 	$self->log->logdie( "API Error: http status:".  $response->code .' '.  $response->message . ' Content: ' . $response->content);
     }
