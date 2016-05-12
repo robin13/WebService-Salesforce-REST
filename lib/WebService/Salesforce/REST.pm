@@ -14,7 +14,7 @@ use YAML qw/Dump LoadFile DumpFile/;
 use Encode;
 use URI::Encode qw/uri_encode/;
 
-our $VERSION = 0.002;
+our $VERSION = 0.003;
 
 =head1 NAME
 
@@ -439,6 +439,30 @@ sub sobject_describe {
 
     return $self->request_from_api( %params );
 }
+
+=item sobject_blob_retrieve
+
+Retrieves the specified blob field from an individual record.
+
+https://developer.salesforce.com/docs/atlas.en-us.api_rest.meta/api_rest/resources_sobject_blob_retrieve.htm
+
+=cut
+
+sub sobject_blob_retrieve {
+    my ( $self, %params ) = validated_hash(
+        \@_,
+        type	    => { isa    => 'Str' },
+        id	    => { isa    => 'Str' },
+        field	    => { isa    => 'Str' },
+	);
+    my %request_params = (
+        path        => sprintf( '/sobjects/%s/%s/%s', $params{type}, $params{id}, $params{field} ),
+        method      => 'GET',
+        expect_blob => 1,
+        );
+
+    return $self->request_from_api( %request_params );
+}
 =item query
 
 execute a query
@@ -462,12 +486,13 @@ sub query {
 sub request_from_api {
     my ( $self, %params ) = validated_hash(
         \@_,
-        method	=> { isa => 'Str', optional => 1, default => 'POST' },
-	path	=> { isa => 'Str', optional => 1 },
-        uri     => { isa => 'Str', optional => 1 },
-        body    => { isa => 'Str', optional => 1 },
-        headers => { isa => 'HTTP::Headers', optional => 1 },
-        options => { isa => 'Str', optional => 1 },
+        method	    => { isa => 'Str', optional => 1, default => 'POST' },
+	path	    => { isa => 'Str', optional => 1 },
+        uri         => { isa => 'Str', optional => 1 },
+        body        => { isa => 'Str', optional => 1 },
+        headers     => { isa => 'HTTP::Headers', optional => 1 },
+        expect_blob => { isa => 'Bool', optional => 1 },
+        options     => { isa => 'Str', optional => 1 },
     );
 
     my $url;
@@ -549,7 +574,11 @@ sub request_from_api {
 	$self->log->logdie( "API Error: http status:".  $response->code .' '.  $response->message . ' Content: ' . $response->content);
     }
     if( $response->decoded_content ){
-        return decode_json( encode( 'utf8', $response->decoded_content ) );
+        if( $params{expect_blob} ){
+            return $response->decoded_content;
+        }else{
+            return decode_json( encode( 'utf8', $response->decoded_content ) );
+        }
     }
     return;
 }
